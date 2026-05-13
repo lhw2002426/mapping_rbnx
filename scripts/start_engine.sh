@@ -19,7 +19,18 @@ set -eo pipefail
 ALGO="${MAPPING_ALGO:-rtabmap}"
 RESOLVED="/tmp/${ALGO}_resolved.yaml"
 
-source /opt/ros/humble/setup.bash
+# Package root: in the docker path everything is bind-mounted under
+# /mapping; in the native path we may not have that symlink so callers
+# (scripts/start_native.sh) export MAPPING_PKG_ROOT instead. Default
+# preserves the original docker behaviour.
+PKG_ROOT="${MAPPING_PKG_ROOT:-/mapping}"
+
+# Source ROS2 only if the parent shell didn't already (the native
+# path sources it before this point; docker entrypoint always needs it).
+if [[ -z "${ROS_DISTRO:-}" && -f /opt/ros/humble/setup.bash ]]; then
+    # shellcheck disable=SC1091
+    source /opt/ros/humble/setup.bash
+fi
 
 read_y() {
     # Never fail under `set -e`: grep returns 1 on no match, which
@@ -65,7 +76,7 @@ case "$ALGO" in
         USE_SIM_TIME="${USE_SIM_TIME_R:-${MAPPING_USE_SIM_TIME:-true}}"
         ENABLE_VIZ="${MAPPING_ENABLE_VIZ:-false}"
         echo "[start_engine] rtabmap scan2d=$SCAN_TOPIC scan3d=$SCAN_CLOUD_TOPIC odom=$ODOM_TOPIC rgb=$RGB_TOPIC depth=$DEPTH_TOPIC base=$BASE_FRAME odomf=$ODOM_FRAME use_sim_time=$USE_SIM_TIME viz=$ENABLE_VIZ"
-        exec ros2 launch /mapping/launch/rtabmap_2d.launch.py \
+        exec ros2 launch "${PKG_ROOT}/launch/rtabmap_2d.launch.py" \
             scan_topic:="$SCAN_TOPIC" \
             scan_cloud_topic:="$SCAN_CLOUD_TOPIC" \
             odom_topic:="$ODOM_TOPIC" \
@@ -102,7 +113,7 @@ case "$ALGO" in
             source /ws/install/setup.bash
         fi
         echo "[start_engine] WARN fastlio2 has known drift; use for repro only"
-        exec ros2 launch /mapping/launch/slam_mapping_native.launch.py
+        exec ros2 launch "${PKG_ROOT}/launch/slam_mapping_native.launch.py"
         ;;
 
     *)
