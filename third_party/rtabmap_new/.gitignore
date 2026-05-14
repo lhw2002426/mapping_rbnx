@@ -1,0 +1,7 @@
+build/
+install/
+log/
+src/rtabmap/
+src/rtabmap_ros/
+!src/
+!src/my_rtabmap_ros.patch

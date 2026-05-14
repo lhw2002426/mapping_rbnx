@@ -29,9 +29,11 @@
 # Pre-conditions (the operator is expected to have these on the host;
 # we check + fail loud rather than silently degrading):
 #   - ROS2 Humble sourced (or available at /opt/ros/humble)
-#   - ros-humble-rtabmap-ros installed (apt)
+#   - rtabmap_ros available from either:
+#       * self-built old_cap/rtabmap_new/install/setup.bash overlay
+#       * or system apt package ros-humble-rtabmap-ros
 #   - python3 + grpcio + protobuf + pyyaml on PATH
-#   - robonix-api importable (rbnx setup has been run)
+#   - generated rbnx proto stubs available under rbnx-build/codegen
 #
 # Trap discipline mirrors the container's: SIGTERM tears down both
 # atlas_bridge and the ros2 launch tree.
@@ -57,12 +59,58 @@ if [[ -z "${ROS_DISTRO:-}" ]]; then
     fi
 fi
 
-# rtabmap binary must be available — the whole point of the native
-# path is calling it directly.
+# rtabmap_ros may be self-built, like old_cap/rtabmap_new/rbnx/start.sh:
+#   source install/setup.bash
+#   ros2 launch rtabmap_examples ...
+# Source that overlay before checking packages so native mode doesn't depend
+# on the apt-provided ros-humble-rtabmap-ros.
+source_rtabmap_overlay() {
+    local -a candidates=()
+    local repo_root
+    repo_root="$(cd "${PKG}/../.." && pwd)"
+
+    if [[ -n "${MAPPING_RTABMAP_SETUP:-}" ]]; then
+        candidates+=("${MAPPING_RTABMAP_SETUP}")
+    fi
+    if [[ -n "${MAPPING_RTABMAP_INSTALL:-}" ]]; then
+        candidates+=("${MAPPING_RTABMAP_INSTALL%/}/setup.bash")
+    fi
+    if [[ -n "${MAPPING_RTABMAP_WS:-}" ]]; then
+        candidates+=("${MAPPING_RTABMAP_WS%/}/install/setup.bash")
+    fi
+
+    candidates+=("${PKG}/third_party/rtabmap_new/install/setup.bash")
+    if [[ "${MAPPING_RTABMAP_USE_OLD_CAP:-}" == "1" ]]; then
+        candidates+=(
+            "${repo_root}/old_cap/rtabmap_new/install/setup.bash"
+            "/home/syswonder/wheatfox/old_cap/rtabmap_new/install/setup.bash"
+        )
+    fi
+
+    local setup
+    for setup in "${candidates[@]}"; do
+        if [[ -f "$setup" ]]; then
+            echo "[start-native] sourcing self-built rtabmap overlay: $setup"
+            # shellcheck disable=SC1090
+            source "$setup"
+            export MAPPING_RTABMAP_SETUP_RESOLVED="$setup"
+            return 0
+        fi
+    done
+    echo "[start-native] WARN: self-built rtabmap overlay not found; falling back to system ROS packages" >&2
+    return 1
+}
+source_rtabmap_overlay || true
+
+# rtabmap packages must be available after sourcing either the custom overlay
+# or the system ROS installation. The native path calls ros2 launch directly.
 if ! ros2 pkg list 2>/dev/null | grep -q '^rtabmap_slam$'; then
-    echo "[start-native] ERR: ros-humble-rtabmap-ros not found in this ROS2 install." >&2
-    echo "[start-native]      sudo apt install ros-humble-rtabmap-ros" >&2
-    echo "[start-native]      Or set ROBONIX_MAPPING_FORCE=docker." >&2
+    echo "[start-native] ERR: rtabmap_slam not found after sourcing ROS2/rtabmap overlays." >&2
+    echo "[start-native]      Build/source old_cap/rtabmap_new, or set one of:" >&2
+    echo "[start-native]        MAPPING_RTABMAP_WS=/path/to/rtabmap_new" >&2
+    echo "[start-native]        MAPPING_RTABMAP_INSTALL=/path/to/rtabmap_new/install" >&2
+    echo "[start-native]        MAPPING_RTABMAP_SETUP=/path/to/install/setup.bash" >&2
+    echo "[start-native]      Fallback: sudo apt install ros-humble-rtabmap-ros" >&2
     exit 2
 fi
 

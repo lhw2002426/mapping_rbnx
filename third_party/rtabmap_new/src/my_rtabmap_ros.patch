@@ -1,0 +1,193 @@
+diff --git a/rtabmap_examples/launch/realsense_d400.launch.py b/rtabmap_examples/launch/realsense_d400.launch.py
+index d2e47aff..cabec6a0 100644
+--- a/rtabmap_examples/launch/realsense_d400.launch.py
++++ b/rtabmap_examples/launch/realsense_d400.launch.py
+@@ -21,34 +21,34 @@ def generate_launch_description():
+           'approx_sync':False}]
+ 
+     remappings=[
+-          ('rgb/image', '/camera/color/image_raw'),
+-          ('rgb/camera_info', '/camera/color/camera_info'),
+-          ('depth/image', '/camera/aligned_depth_to_color/image_raw')]
++          ('rgb/image', '/camera/camera/color/image_raw'),
++          ('rgb/camera_info', '/camera/camera/color/camera_info'),
++          ('depth/image', '/camera/camera/aligned_depth_to_color/image_raw')]
+ 
+     return LaunchDescription([
+ 
+-        # Make sure IR emitter is enabled
+-        SetParameter(name='depth_module.emitter_enabled', value=1),
+-
+-        # Launch camera driver
+-        IncludeLaunchDescription(
+-            PythonLaunchDescriptionSource([os.path.join(
+-                get_package_share_directory('realsense2_camera'), 'launch'),
+-                '/rs_launch.py']),
+-                launch_arguments={'align_depth.enable': 'true',
+-                                  'rgb_camera.profile': '640x360x30'}.items(),
+-        ),
+-
+-        Node(
+-            package='rtabmap_odom', executable='rgbd_odometry', output='screen',
+-            parameters=parameters,
+-            remappings=remappings),
+-
+-        Node(
+-            package='rtabmap_slam', executable='rtabmap', output='screen',
+-            parameters=parameters,
+-            remappings=remappings,
+-            arguments=['-d']),
++        # # Make sure IR emitter is enabled
++        # SetParameter(name='depth_module.emitter_enabled', value=1),
++
++        # # Launch camera driver
++        # IncludeLaunchDescription(
++        #     PythonLaunchDescriptionSource([os.path.join(
++        #         get_package_share_directory('realsense2_camera'), 'launch'),
++        #         '/rs_launch.py']),
++        #         launch_arguments={'align_depth.enable': 'true',
++        #                           'rgb_camera.profile': '640x360x30'}.items(),
++        # ),
++
++        # Node(
++        #     package='rtabmap_odom', executable='rgbd_odometry', output='screen',
++        #     parameters=parameters,
++        #     remappings=remappings),
++
++        # Node(
++        #     package='rtabmap_slam', executable='rtabmap', output='screen',
++        #     parameters=parameters,
++        #     remappings=remappings,
++        #     arguments=['-d']),
+ 
+         Node(
+             package='rtabmap_viz', executable='rtabmap_viz', output='screen',
+diff --git a/rtabmap_examples/launch/realsense_d435i_color.launch.py b/rtabmap_examples/launch/realsense_d435i_color.launch.py
+index c0eb257f..aa969ea9 100644
+--- a/rtabmap_examples/launch/realsense_d435i_color.launch.py
++++ b/rtabmap_examples/launch/realsense_d435i_color.launch.py
+@@ -14,19 +14,42 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+ from launch.launch_description_sources import PythonLaunchDescriptionSource
+ from launch.substitutions import LaunchConfiguration
+ 
++MAP_DB_PATH = "/home/syswonder/zhengwu/new-rbnx/rtabmap.db"
++
+ def generate_launch_description():
+     parameters=[{
+-          'frame_id':'camera_link',
++          'frame_id':'base_ground',
++          'use_sim_time':False,
++          'wait_imu_to_init':True,
++          'approx_sync':True,
+           'subscribe_depth':True,
+-          'subscribe_odom_info':True,
+-          'approx_sync':False,
+-          'wait_imu_to_init':True}]
++          'subscribe_scan_cloud':True,
++          'use_action_for_goal':True,
++          # RTAB-Map's parameters should be strings:
++        #   'Mem/IncrementalMemory': 'false',   # 禁止新增节点 → 不建图
++        #   'Mem/InitWMWithAllNodes': 'true',   # 允许全局重定位（从任意位置开始）
++          'database_path': MAP_DB_PATH,       # 必须指向你预先建好的 .db 文件
++          'Reg/Strategy':'1',
++          'Reg/Force3DoF':'true',
++          'RGBD/NeighborLinkRefining':'True',
++          'Grid/RayTracing':'True', # Fill empty space
++          'Grid/3D':'True', # Use 2D occupancy
++          'Grid/RangeMax':'3',
++          'Grid/NormalsSegmentation':'True', # Use passthrough filter to detect obstacles
++          'Grid/Sensor':'2', # Use both laser scan and camera for obstacle detection in global map
++          'Grid/MaxGroundHeight':'0.1', # All points above 5 cm are obstacles
++          'Grid/MaxObstacleHeight':'2.0',  # All points over 1 meter are ignored
++          'Grid/RangeMin':'0.05', # ignore laser scan points on the robot itself
++          'Optimizer/GravitySigma':'0' # Disable imu constraints (we are already in 2D)
++    }]
+ 
+     remappings=[
+           ('imu', '/imu/data'),
+-          ('rgb/image', '/camera/color/image_raw'),
+-          ('rgb/camera_info', '/camera/color/camera_info'),
+-          ('depth/image', '/camera/aligned_depth_to_color/image_raw')]
++          ('/scan_cloud', '/scanner/cloud'),
++          ('rgb/image', '/camera_435i/color/image_raw'),
++          ('rgb/camera_info', '/camera_435i/color/camera_info'),
++          ('depth/image', '/camera_435i/aligned_depth_to_color/image_raw'),
++          ('/octomap_grid', '/map')]
+ 
+     return LaunchDescription([
+ 
+@@ -46,43 +69,18 @@ def generate_launch_description():
+             'odom_args', default_value='',
+             description='Extra arguments just for odometry node. If the same argument is already set in \"args\", it will be overwritten by the one in \"odom_args\".'),
+ 
+-
+-        # Launch camera driver
+-        IncludeLaunchDescription(
+-            PythonLaunchDescriptionSource([os.path.join(
+-                get_package_share_directory('realsense2_camera'), 'launch'),
+-                '/rs_launch.py']),
+-                launch_arguments={'camera_namespace': '',
+-                                  'enable_gyro': 'true',
+-                                  'enable_accel': 'true',
+-                                  'unite_imu_method': LaunchConfiguration('unite_imu_method'),
+-                                  'align_depth.enable': 'true',
+-                                  'enable_sync': 'true',
+-                                  'rgb_camera.profile': '640x360x30'}.items(),
+-        ),
+-
+-        Node(
+-            package='rtabmap_odom', executable='rgbd_odometry', output='screen',
+-            parameters=parameters,
+-            arguments=[LaunchConfiguration("args"), LaunchConfiguration("odom_args")],
+-            remappings=remappings),
+-
+         Node(
+             package='rtabmap_slam', executable='rtabmap', output='screen',
+             parameters=parameters,
+             remappings=remappings,
+             arguments=['-d', LaunchConfiguration("args")]),
+-
+-        Node(
+-            package='rtabmap_viz', executable='rtabmap_viz', output='screen',
+-            parameters=parameters,
+-            remappings=remappings),
++            # arguments=[LaunchConfiguration("args")]),
+ 
+         # Compute quaternion of the IMU
+         Node(
+             package='imu_filter_madgwick', executable='imu_filter_madgwick_node', output='screen',
+             parameters=[{'use_mag': False, 
+-                         'world_frame':'enu', 
++                         'world_frame':'map', 
+                          'publish_tf':False}],
+-            remappings=[('imu/data_raw', '/camera/imu')]),
++            remappings=[('imu/data_raw', '/camera_435i/imu')]),
+     ])
+diff --git a/rtabmap_examples/launch/realsense_d435i_infra.launch.py b/rtabmap_examples/launch/realsense_d435i_infra.launch.py
+index a3e6c017..a11e9e23 100644
+--- a/rtabmap_examples/launch/realsense_d435i_infra.launch.py
++++ b/rtabmap_examples/launch/realsense_d435i_infra.launch.py
+@@ -21,7 +21,14 @@ def generate_launch_description():
+           'subscribe_depth':True,
+           'subscribe_odom_info':True,
+           'approx_sync':False,
+-          'wait_imu_to_init':True}]
++          'wait_imu_to_init':True,
++          'Grid/MaxGroundHeight': '-0.2',      # 最大地面高度（米）
++          'Grid/MaxObstacleHeight': '0.2',    # 最大障碍物高度（米），可视为天花板高度
++        #   'RGBD/ProximityPathMaxDepth': 2.8,  # 最大深度 2.5米
++        #   'RGBD/ProximityPathMinDepth': 0.4,  # 最小深度 0.4米
++        #   'Grid/RangeMax': '3.0',                    # 最大感知范围
++        #   'Grid/RangeMin': '0.3',                    # 最小感知范围
++          }]
+ 
+     remappings=[
+           ('imu', '/imu/data'),
+@@ -58,6 +65,7 @@ def generate_launch_description():
+                                   'unite_imu_method': LaunchConfiguration('unite_imu_method'),
+                                   'enable_infra1': 'true',
+                                   'enable_infra2': 'true',
++                                  'publish_tf': 'false',
+                                   'enable_sync': 'true'}.items(),
+         ),
+ 
