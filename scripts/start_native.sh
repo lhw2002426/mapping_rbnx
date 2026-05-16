@@ -40,16 +40,59 @@
 
 set -eo pipefail
 
+source_setup_bash() {
+    local setup="$1"
+    local old_opts="$-"
+    # colcon/ament setup scripts are not guaranteed to be safe under strict
+    # caller environments; keep optional tracing vars defined while sourcing.
+    export COLCON_TRACE="${COLCON_TRACE:-}"
+    set +u
+    # shellcheck disable=SC1090
+    source "$setup"
+    case "$old_opts" in
+        *u*) set -u ;;
+        *) set +u ;;
+    esac
+}
+
+prepend_path() {
+    local var="$1"
+    local value="$2"
+    local current="${!var-}"
+    [[ -d "$value" ]] || return 0
+    case ":$current:" in
+        *:"$value":*) ;;
+        *) export "$var=$value${current:+:$current}" ;;
+    esac
+}
+
+repair_colcon_prefixes_from_install() {
+    local setup="${MAPPING_RTABMAP_SETUP_RESOLVED:-}"
+    [[ -n "$setup" ]] || return 0
+    local install
+    install="$(cd "$(dirname "$setup")" 2>/dev/null && pwd || true)"
+    [[ -d "$install" ]] || return 0
+
+    local prefix
+    for prefix in "$install" "$install"/*; do
+        [[ -d "$prefix/share/ament_index/resource_index/packages" ]] || continue
+        prepend_path AMENT_PREFIX_PATH "$prefix"
+        prepend_path CMAKE_PREFIX_PATH "$prefix"
+        prepend_path PATH "$prefix/bin"
+        prepend_path LD_LIBRARY_PATH "$prefix/lib"
+        prepend_path PYTHONPATH "$prefix/lib/python3/dist-packages"
+    done
+}
+
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PKG"
 
 # ── Pre-flight checks ─────────────────────────────────────────────────
-# Source ROS2 if it isn't already (start.sh is typically invoked from
-# rbnx boot's spawn body which doesn't inherit user's ros setup).
-if [[ -z "${ROS_DISTRO:-}" ]]; then
+# Source ROS2 if it isn't fully available. rbnx boot may preserve ROS_DISTRO
+# but not PATH/AMENT_PREFIX_PATH, so checking ROS_DISTRO alone is not enough.
+if [[ -z "${ROS_DISTRO:-}" || -z "${AMENT_PREFIX_PATH:-}" ]] || ! command -v ros2 >/dev/null 2>&1; then
     if [[ -f /opt/ros/humble/setup.bash ]]; then
-        # shellcheck disable=SC1091
-        source /opt/ros/humble/setup.bash
+        source_setup_bash /opt/ros/humble/setup.bash
     else
         echo "[start-native] ERR: ROS2 not sourced and /opt/ros/humble/setup.bash missing." >&2
         echo "[start-native]      For platform=jetson_orin we expect a host ROS2 Humble install." >&2
@@ -91,8 +134,7 @@ source_rtabmap_overlay() {
     for setup in "${candidates[@]}"; do
         if [[ -f "$setup" ]]; then
             echo "[start-native] sourcing self-built rtabmap overlay: $setup"
-            # shellcheck disable=SC1090
-            source "$setup"
+            source_setup_bash "$setup"
             export MAPPING_RTABMAP_SETUP_RESOLVED="$setup"
             return 0
         fi
@@ -102,10 +144,23 @@ source_rtabmap_overlay() {
 }
 source_rtabmap_overlay || true
 
+# If the top-level setup.bash did not expose an isolated colcon install (seen
+# under rbnx boot's sanitized environment), reconstruct the key prefix paths.
+if ! ros2 pkg list 2>/dev/null | grep -q '^rtabmap_slam$'; then
+    repair_colcon_prefixes_from_install
+fi
+
 # rtabmap packages must be available after sourcing either the custom overlay
 # or the system ROS installation. The native path calls ros2 launch directly.
-if ! ros2 pkg list 2>/dev/null | grep -q '^rtabmap_slam$'; then
+RTABMAP_PKG_LIST="$(ros2 pkg list 2>&1)" || {
+    echo "[start-native] ERR: failed to run 'ros2 pkg list' after sourcing ROS2/rtabmap overlays." >&2
+    echo "$RTABMAP_PKG_LIST" >&2
+    exit 2
+}
+if ! grep -q '^rtabmap_slam$' <<<"$RTABMAP_PKG_LIST"; then
     echo "[start-native] ERR: rtabmap_slam not found after sourcing ROS2/rtabmap overlays." >&2
+    echo "[start-native]      resolved setup: ${MAPPING_RTABMAP_SETUP_RESOLVED:-<none>}" >&2
+    echo "[start-native]      AMENT_PREFIX_PATH=${AMENT_PREFIX_PATH:-<unset>}" >&2
     echo "[start-native]      Build/source old_cap/rtabmap_new, or set one of:" >&2
     echo "[start-native]        MAPPING_RTABMAP_WS=/path/to/rtabmap_new" >&2
     echo "[start-native]        MAPPING_RTABMAP_INSTALL=/path/to/rtabmap_new/install" >&2
