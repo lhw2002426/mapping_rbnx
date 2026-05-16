@@ -1,0 +1,12 @@
+# Legacy RTAB-Map database reference carried over from old_cap/rtabmap_new.
+#
+# The old package did not store the .db inside old_cap; it only referenced this
+# externally provisioned file in rbnx_manifest.yaml metadata.database_path.
+# start_engine.sh now auto-uses this path when it exists, or you can override it
+# with MAPPING_RTABMAP_DB_PATH / deploy config `map_database_path`.
+map_database_path: /home/syswonder/zhengwu/new-rbnx/rtabmap.db
+map_mode: mapping
+
+# Set map_mode: localization to load the DB read-only-style for relocalization:
+#   Mem/IncrementalMemory=false
+#   Mem/InitWMWithAllNodes=true

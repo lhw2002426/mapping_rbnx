@@ -71,21 +71,39 @@ case "$ALGO" in
         BASE_FRAME=$(read_y base_frame)
         ODOM_FRAME=$(read_y odom_frame)
         USE_SIM_TIME_R=$(read_y use_sim_time)
+        MAP_DB_PATH_R=$(read_y map_database_path)
+        MAP_MODE_R=$(read_y map_mode)
         BASE_FRAME="${BASE_FRAME:-base_link}"
         ODOM_FRAME="${ODOM_FRAME:-odom}"
         USE_SIM_TIME="${USE_SIM_TIME_R:-${MAPPING_USE_SIM_TIME:-true}}"
         ENABLE_VIZ="${MAPPING_ENABLE_VIZ:-false}"
-        echo "[start_engine] rtabmap scan2d=$SCAN_TOPIC scan3d=$SCAN_CLOUD_TOPIC odom=$ODOM_TOPIC rgb=$RGB_TOPIC depth=$DEPTH_TOPIC base=$BASE_FRAME odomf=$ODOM_FRAME use_sim_time=$USE_SIM_TIME viz=$ENABLE_VIZ"
-        exec ros2 launch "${PKG_ROOT}/launch/rtabmap_2d.launch.py" \
-            scan_topic:="$SCAN_TOPIC" \
-            scan_cloud_topic:="$SCAN_CLOUD_TOPIC" \
-            odom_topic:="$ODOM_TOPIC" \
-            rgb_topic:="$RGB_TOPIC" \
-            depth_topic:="$DEPTH_TOPIC" \
-            base_frame:="$BASE_FRAME" \
-            odom_frame:="$ODOM_FRAME" \
-            use_sim_time:="$USE_SIM_TIME" \
-            enable_viz:="$ENABLE_VIZ"
+        MAP_DB_PATH="${MAPPING_RTABMAP_DB_PATH:-${MAP_DB_PATH_R:-}}"
+        LEGACY_MAP_DB="/home/syswonder/zhengwu/new-rbnx/rtabmap.db"
+        if [[ -z "$MAP_DB_PATH" && "${MAPPING_RTABMAP_USE_LEGACY_DB:-0}" == "1" && -f "$LEGACY_MAP_DB" ]]; then
+            MAP_DB_PATH="$LEGACY_MAP_DB"
+        fi
+        MAP_MODE="${MAPPING_RTABMAP_MODE:-${MAP_MODE_R:-mapping}}"
+        if [[ -n "$MAP_DB_PATH" && ! -f "$MAP_DB_PATH" ]]; then
+            echo "[start_engine] WARN rtabmap database_path does not exist: $MAP_DB_PATH (starting with a fresh map)" >&2
+            MAP_DB_PATH=""
+        fi
+        echo "[start_engine] rtabmap scan2d=$SCAN_TOPIC scan3d=$SCAN_CLOUD_TOPIC odom=$ODOM_TOPIC rgb=$RGB_TOPIC depth=$DEPTH_TOPIC base=$BASE_FRAME odomf=$ODOM_FRAME use_sim_time=$USE_SIM_TIME viz=$ENABLE_VIZ db=${MAP_DB_PATH:-<fresh>} mode=$MAP_MODE"
+        LAUNCH_ARGS=(
+            "scan_topic:=$SCAN_TOPIC"
+            "scan_cloud_topic:=$SCAN_CLOUD_TOPIC"
+            "odom_topic:=$ODOM_TOPIC"
+            "rgb_topic:=$RGB_TOPIC"
+            "depth_topic:=$DEPTH_TOPIC"
+            "base_frame:=$BASE_FRAME"
+            "odom_frame:=$ODOM_FRAME"
+            "use_sim_time:=$USE_SIM_TIME"
+            "enable_viz:=$ENABLE_VIZ"
+            "map_mode:=$MAP_MODE"
+        )
+        if [[ -n "$MAP_DB_PATH" ]]; then
+            LAUNCH_ARGS+=("database_path:=$MAP_DB_PATH")
+        fi
+        exec ros2 launch "${PKG_ROOT}/launch/rtabmap_2d.launch.py" "${LAUNCH_ARGS[@]}"
         ;;
 
     dlio)

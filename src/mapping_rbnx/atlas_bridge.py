@@ -422,6 +422,18 @@ def _handle_init(cfg: dict[str, Any]):
     for key in ("base_frame", "odom_frame", "map_frame", "use_sim_time"):
         if key in cfg:
             resolved[key] = str(cfg[key]).lower() if key == "use_sim_time" else str(cfg[key])
+
+    # Optional prebuilt RTAB-Map database. The old rtabmap package exposed this
+    # as metadata.database_path; accept several config spellings for backwards
+    # compatibility with existing deploy manifests.
+    for key in ("map_database_path", "rtabmap_database_path", "database_path"):
+        value = str(cfg.get(key, "")).strip()
+        if value:
+            resolved["map_database_path"] = value
+            break
+    map_mode = str(cfg.get("map_mode", cfg.get("mode", ""))).strip().lower()
+    if map_mode in ("mapping", "localization", "localisation"):
+        resolved["map_mode"] = "localization" if map_mode == "localisation" else map_mode
     _write_resolved_yaml(algo, resolved)
 
     # Declare outputs (after resolved.yaml so launch can start in parallel).

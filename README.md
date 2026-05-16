@@ -86,6 +86,23 @@ On x86 desktop / isaac sim hosts none of those points hold the same
 way (toolchain drift is real, isaac sim eats the GPU + RMW config),
 so the docker fallback stays the default.
 
+## Prebuilt RTAB-Map database
+
+The old `old_cap/rtabmap_new` package did not vendor a `.db` map file in the
+repository; it only referenced an externally provisioned database at
+`/home/syswonder/zhengwu/new-rbnx/rtabmap.db`. `mapping_rbnx` now preserves
+that behavior:
+
+- if `MAPPING_RTABMAP_DB_PATH` is set, `rtabmap` loads that database;
+- deploy config may also pass `map_database_path`, `rtabmap_database_path`, or
+  `database_path` through `CMD_INIT`;
+- set `MAPPING_RTABMAP_USE_LEGACY_DB=1` to explicitly opt into the old default
+  `/home/syswonder/zhengwu/new-rbnx/rtabmap.db` when it exists;
+- set `map_mode: localization` or `MAPPING_RTABMAP_MODE=localization` to load
+  the DB for relocalization without adding new nodes.
+
+See `config/rtabmap_legacy_map.yaml` for the legacy path reference.
+
 ## File map
 
 | File                              | Owner of                                              |

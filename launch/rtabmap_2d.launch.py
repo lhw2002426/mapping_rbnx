@@ -55,6 +55,8 @@ def generate_launch_description():
         DeclareLaunchArgument("base_frame", default_value="base_link"),
         DeclareLaunchArgument("odom_frame", default_value="odom"),
         DeclareLaunchArgument("enable_viz", default_value="false"),
+        DeclareLaunchArgument("database_path", default_value=""),
+        DeclareLaunchArgument("map_mode", default_value="mapping"),
         OpaqueFunction(function=_make_nodes),
     ])
 
@@ -69,8 +71,12 @@ def _make_nodes(context, *args, **kwargs):
     depth_topic = LaunchConfiguration("depth_topic").perform(context)
     base_frame = LaunchConfiguration("base_frame").perform(context)
     odom_frame = LaunchConfiguration("odom_frame").perform(context)
+    database_path = LaunchConfiguration("database_path").perform(context).strip()
+    map_mode = LaunchConfiguration("map_mode").perform(context).strip().lower()
     enable_viz = LaunchConfiguration("enable_viz").perform(context).lower() == "true"
     use_sim_time = use_sim_time_str.lower() == "true"
+    use_existing_db = bool(database_path) and os.path.exists(database_path)
+    localization_mode = use_existing_db and map_mode in ("localization", "localisation")
 
     have_scan = bool(scan_topic) and scan_topic != _NONE
     have_scan_cloud = bool(scan_cloud_topic) and scan_cloud_topic != _NONE
@@ -128,8 +134,8 @@ def _make_nodes(context, *args, **kwargs):
         "Grid/NormalsSegmentation": "false",
         "Grid/MaxObstacleHeight": "1.5",
         "Grid/MaxGroundHeight": "0.05",
-        "Mem/IncrementalMemory": "true",
-        "Mem/InitWMWithAllNodes": "false",
+        "Mem/IncrementalMemory": "false" if localization_mode else "true",
+        "Mem/InitWMWithAllNodes": "true" if localization_mode else "false",
         "Reg/Strategy": "1",        # 0=Visual, 1=ICP, 2=Visual+ICP
         "Reg/Force3DoF": "true",
         "Optimizer/Strategy": "1",  # g2o
@@ -172,13 +178,18 @@ def _make_nodes(context, *args, **kwargs):
             ("depth/image", depth_topic),
         ]
 
+    if use_existing_db:
+        rtabmap_params["database_path"] = database_path
+
+    rtabmap_args = [] if use_existing_db else ["--delete_db_on_start"]
+
     rtabmap_node = Node(
         package="rtabmap_slam",
         executable="rtabmap",
         name="rtabmap",
         output="screen",
         parameters=[rtabmap_params],
-        arguments=["--delete_db_on_start"],
+        arguments=rtabmap_args,
         remappings=rtabmap_remappings,
     )
 
