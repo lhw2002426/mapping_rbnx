@@ -230,12 +230,26 @@ trap cleanup EXIT INT TERM
 
 # ── 1. atlas_bridge ────────────────────────────────────────────────────
 echo "[start-native] launching atlas_bridge (atlas=${ROBONIX_ATLAS}, cap=${ROBONIX_CAPABILITY_ID})"
-# `python3 -u` forces unbuffered stdout/stderr — without it, piping
-# through `sed` block-buffers Python's logging output, and you get
-# 60 seconds of silence followed by an "atlas_bridge stuck" timeout
-# even when the bridge crashed loudly on the very first line.
-python3 -u -m mapping_rbnx.atlas_bridge 2>&1 | sed 's/^/[bridge] /' &
+# Old form was:
+#   python3 -m mapping_rbnx.atlas_bridge 2>&1 | sed 's/^/[bridge] /' &
+#   ATLAS_PID=$!
+# but in `cmdA | cmdB &`, bash sets `$!` to the LAST pipeline element —
+# i.e. the sed PID, not python's. Our liveness probe (`kill -0
+# "$ATLAS_PID"`) was therefore checking sed, which stays alive as long
+# as python's stdout half of the pipe is open. Net effect: when python
+# silently hung at import time, we never noticed; the script just slept
+# its full 30 seconds and then claimed `/tmp/mapping_algo never
+# appeared`, with no clue that python had been broken from the start.
+#
+# Fix: use process substitution (>(...)) so the foreground command
+# IS the python interpreter. Then `$!` is python's PID and `kill -0`
+# probes the right process. `python3 -u` plus the sys.stdout/stderr
+# reconfigure(line_buffering=True) inside atlas_bridge.py make sure
+# every log line shows up immediately.
+python3 -u -m mapping_rbnx.atlas_bridge \
+    > >(sed 's/^/[bridge] /') 2> >(sed 's/^/[bridge] /' >&2) &
 ATLAS_PID=$!
+echo "[start-native] atlas_bridge pid=${ATLAS_PID}"
 
 # ── 2. Wait for CMD_INIT to land ──────────────────────────────────────
 # Same gating signals as the container: atlas_bridge writes
@@ -259,6 +273,7 @@ if [[ ! -f /tmp/mapping_algo ]]; then
     echo "[start-native]        - rbnx boot didn't reach this cap (check atlas + boot logs)" >&2
     echo "[start-native]        - bridge declared driver iface on a port boot can't reach (firewall/NAT?)" >&2
     echo "[start-native]        - port ${MAPPING_GRPC_PORT} held by a stale mapping process: \`sudo lsof -i :${MAPPING_GRPC_PORT}\`" >&2
+    echo "[start-native]        - python import-time hang (rare; gdb -p ${ATLAS_PID} to inspect)" >&2
     exit 5
 fi
 ALGO="$(cat /tmp/mapping_algo 2>/dev/null || echo rtabmap)"
