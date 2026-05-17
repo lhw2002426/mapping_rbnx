@@ -466,22 +466,53 @@ class _MapDriverServicer(contracts_grpc.RobonixServiceMapDriverServicer):
 
 
 def _start_grpc(requested_port: int) -> int:
+    """Start the mapping driver gRPC server. Returns the actually-bound port.
+
+    grpc-python's bind-failure contract has changed across versions:
+      * <=1.57   add_insecure_port returned 0 on EADDRINUSE.
+      * >=1.58   add_insecure_port RAISES RuntimeError on EADDRINUSE
+                 (see grpc/_common.py::validate_port_binding_result).
+    Earlier code only handled the legacy "returned 0" path and crashed
+    the whole bridge when a stale process was still holding port 50120
+    — at which point entrypoint.sh's `/tmp/<algo>_resolved.yaml` wait
+    timed out and start_engine.sh launched rtabmap with every sensor
+    bound to <none>, surfacing as "no sensor inputs enabled".
+
+    Robust path: try the requested port; on EITHER signal of failure,
+    fall back to OS-assigned :0. Always log the actually bound port,
+    NEVER the requested port — we declare the bound one to atlas, so
+    a mismatch would silently break Driver(CMD_INIT) routing.
+    """
     global _grpc_server
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     contracts_grpc.add_RobonixServiceMapDriverServicer_to_server(
         _MapDriverServicer(), server)
-    bound = server.add_insecure_port(f"0.0.0.0:{requested_port}")
-    log.info("add_insecure_port(0.0.0.0:%d) returned %d", requested_port, bound)
+
+    bound = 0
+    try:
+        bound = server.add_insecure_port(f"0.0.0.0:{requested_port}")
+    except RuntimeError as e:
+        # grpc-python >=1.58 path. Don't propagate — fall through to :0.
+        log.warning("bind to 0.0.0.0:%d raised %s; retrying with :0",
+                    requested_port, e)
+        bound = 0
+
     if bound == 0:
-        log.warning("bind to 0.0.0.0:%d failed; retrying with OS-assigned port", requested_port)
-        bound = server.add_insecure_port("0.0.0.0:0")
-        log.info("add_insecure_port(0.0.0.0:0) returned %d", bound)
-        if bound == 0:
-            log.error("gRPC cannot bind any port; aborting")
+        log.warning("port %d unavailable; retrying with OS-assigned port",
+                    requested_port)
+        try:
+            bound = server.add_insecure_port("0.0.0.0:0")
+        except RuntimeError as e:
+            log.error("gRPC cannot bind any port: %s — aborting", e)
             sys.exit(2)
+        if bound == 0:
+            log.error("gRPC cannot bind any port (returned 0); aborting")
+            sys.exit(2)
+
     server.start()
     _grpc_server = server
-    log.info("Mapping gRPC serving on 0.0.0.0:%d (requested %d)", bound, requested_port)
+    log.info("Mapping gRPC serving on 0.0.0.0:%d (requested %d)",
+             bound, requested_port)
     return bound
 
 
