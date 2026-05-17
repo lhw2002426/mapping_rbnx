@@ -230,7 +230,11 @@ trap cleanup EXIT INT TERM
 
 # ── 1. atlas_bridge ────────────────────────────────────────────────────
 echo "[start-native] launching atlas_bridge (atlas=${ROBONIX_ATLAS}, cap=${ROBONIX_CAPABILITY_ID})"
-python3 -m mapping_rbnx.atlas_bridge 2>&1 | sed 's/^/[bridge] /' &
+# `python3 -u` forces unbuffered stdout/stderr — without it, piping
+# through `sed` block-buffers Python's logging output, and you get
+# 60 seconds of silence followed by an "atlas_bridge stuck" timeout
+# even when the bridge crashed loudly on the very first line.
+python3 -u -m mapping_rbnx.atlas_bridge 2>&1 | sed 's/^/[bridge] /' &
 ATLAS_PID=$!
 
 # ── 2. Wait for CMD_INIT to land ──────────────────────────────────────
@@ -240,13 +244,32 @@ ATLAS_PID=$!
 # wouldn't know which algo to launch nor which topics to remap.
 for _ in $(seq 1 60); do
     [[ -f /tmp/mapping_algo ]] && break
+    # Detect early bridge death — without this we'd uselessly sleep the
+    # full 30 seconds even if the bridge already crashed in main().
+    if ! kill -0 "$ATLAS_PID" 2>/dev/null; then
+        echo "[start-native] ERR: atlas_bridge (pid=$ATLAS_PID) exited before /tmp/mapping_algo appeared." >&2
+        echo "[start-native]      Look above this line for [bridge] traceback / port-bind errors." >&2
+        exit 4
+    fi
     sleep 0.5
 done
+if [[ ! -f /tmp/mapping_algo ]]; then
+    echo "[start-native] ERR: /tmp/mapping_algo never appeared (bridge alive but no Driver(CMD_INIT) received)." >&2
+    echo "[start-native]      Likely causes:" >&2
+    echo "[start-native]        - rbnx boot didn't reach this cap (check atlas + boot logs)" >&2
+    echo "[start-native]        - bridge declared driver iface on a port boot can't reach (firewall/NAT?)" >&2
+    echo "[start-native]        - port ${MAPPING_GRPC_PORT} held by a stale mapping process: \`sudo lsof -i :${MAPPING_GRPC_PORT}\`" >&2
+    exit 5
+fi
 ALGO="$(cat /tmp/mapping_algo 2>/dev/null || echo rtabmap)"
 export MAPPING_ALGO="$ALGO"
 RESOLVED="/tmp/${ALGO}_resolved.yaml"
 for _ in $(seq 1 60); do
     [[ -f "$RESOLVED" ]] && break
+    if ! kill -0 "$ATLAS_PID" 2>/dev/null; then
+        echo "[start-native] ERR: atlas_bridge died after CMD_INIT but before writing ${RESOLVED}." >&2
+        exit 6
+    fi
     sleep 0.5
 done
 

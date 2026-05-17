@@ -35,9 +35,30 @@ from concurrent import futures
 from pathlib import Path
 from typing import Any, Optional
 
+# Make stdout/stderr line-buffered even when our parent piped us through
+# `sed` (the default block-buffering would hide every log message until
+# the bridge exits or the buffer fills, which made past failures look
+# like "bridge silently hangs forever" when in reality it crashed
+# loudly but the message was sitting in a 4 KiB buffer). Equivalent to
+# `python3 -u`, but enforced here so any operator launching us via
+# `python3 -m mapping_rbnx.atlas_bridge | sed ...` gets immediate
+# feedback without remembering -u.
+try:
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+except Exception:  # noqa: BLE001
+    pass
+
 logging.basicConfig(level=logging.INFO,
-                    format="[atlas_bridge] %(levelname)s %(message)s")
+                    format="[atlas_bridge] %(levelname)s %(message)s",
+                    stream=sys.stderr)
 log = logging.getLogger("mapping_rbnx.atlas_bridge")
+# First sign of life — if you see this in `[bridge] ...` output, the
+# Python interpreter started, our module imported cleanly, and stderr
+# is flowing. If you DON'T see this and the bridge appears stuck, the
+# problem is upstream of us (PYTHONPATH wrong, codegen missing,
+# rclpy / grpcio import-time hang).
+print("[atlas_bridge] module loaded; pid=", os.getpid(), flush=True)
 
 
 def _ensure_proto_gen() -> None:
@@ -551,13 +572,19 @@ def _on_signal(signum, _frame):
 def main() -> int:
     global _atlas_stub
 
+    print(f"[atlas_bridge] main() entered; atlas={ATLAS_ENDPOINT} cap={CAP_ID} "
+          f"pkg_host_dir={PKG_HOST_DIR} resolved_dir={RESOLVED_DIR}", flush=True)
+
     requested_port = int(os.environ.get("MAPPING_GRPC_PORT", "50120"))
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
+    print(f"[atlas_bridge] starting driver gRPC on requested port {requested_port}", flush=True)
     driver_port = _start_grpc(requested_port)
     os.environ["MAPPING_GRPC_PORT"] = str(driver_port)
+    print(f"[atlas_bridge] driver gRPC bound on :{driver_port}", flush=True)
 
+    print(f"[atlas_bridge] connecting to atlas at {ATLAS_ENDPOINT}", flush=True)
     channel = grpc.insecure_channel(ATLAS_ENDPOINT)
     stub = pb_grpc.AtlasStub(channel)
     _atlas_stub = stub
@@ -587,6 +614,8 @@ def main() -> int:
             log.warning("atlas DeclareInterface(driver) failed: %s", e)
 
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    print(f"[atlas_bridge] ready — awaiting Driver(CMD_INIT) on :{driver_port}",
+          flush=True)
     log.info("ready — awaiting Driver(CMD_INIT)")
     while True:
         time.sleep(60.0)
