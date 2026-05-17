@@ -44,8 +44,8 @@ from typing import Any, Optional
 # `python3 -m mapping_rbnx.atlas_bridge | sed ...` gets immediate
 # feedback without remembering -u.
 try:
-    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
+    sys.stderr.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
 except Exception:  # noqa: BLE001
     pass
 
@@ -80,10 +80,53 @@ _ensure_proto_gen()
 # fallback for direct `python3 -m mapping_rbnx.atlas_bridge` runs.
 import grpc  # noqa: E402
 
-import atlas_pb2 as pb  # type: ignore  # noqa: E402
-import atlas_pb2_grpc as pb_grpc  # type: ignore  # noqa: E402
 import lifecycle_pb2  # type: ignore  # noqa: E402
 import robonix_contracts_pb2_grpc as contracts_grpc  # type: ignore  # noqa: E402
+
+# atlas_pb2 / atlas_pb2_grpc used to be imported here for the legacy
+# hand-rolled AtlasStub flow (`stub.RegisterCapability(...)` etc.).
+# Everything atlas-side now goes through `robonix_api.ATLAS`, which
+# owns its own atlas channel — direct atlas_pb2 imports are dead and
+# their codegen modules drift independently from atlas's wire schema.
+# Don't add them back without a concrete reason.
+
+# Sanity-check at import time: codegen MUST have emitted the lifecycle
+# Driver servicer for `robonix/service/map/driver`. If the package was
+# built without `--mcp` or with an outdated rbnx codegen, the name
+# below silently won't exist and we'd later crash mid-init with an
+# AttributeError that the operator would mistake for "bridge hung".
+# Fail loud instead so it's obvious to fix (`bash scripts/build.sh`).
+_REQUIRED_SERVICER_NAMES = (
+    "RobonixServiceMapDriverServicer",
+    "add_RobonixServiceMapDriverServicer_to_server",
+)
+_missing_codegen_symbols = [
+    n for n in _REQUIRED_SERVICER_NAMES if not hasattr(contracts_grpc, n)
+]
+if _missing_codegen_symbols:
+    print(
+        f"[atlas_bridge] FATAL: robonix_contracts_pb2_grpc is missing "
+        f"{_missing_codegen_symbols}. This means `rbnx codegen` did not "
+        f"emit the service/map/driver lifecycle stub. Re-run "
+        f"`bash scripts/build.sh` for this package and ensure "
+        f"package_manifest.yaml lists `robonix/service/map/driver`.",
+        flush=True,
+    )
+    sys.exit(2)
+
+# ── robonix_api atlas client ─────────────────────────────────────────────────
+# The robonix_api `ATLAS` singleton speaks the CURRENT atlas wire protocol
+# (RegisterPrimitive/Service/Skill, DeclareCapability, find_capability, ...).
+# Older mapping_rbnx code hand-rolled gRPC calls to RegisterCapability /
+# DeclareInterface / QueryCapabilities / ConnectCapability — those methods
+# were removed when atlas split capability registration by kind, and any
+# call to them now returns StatusCode.UNIMPLEMENTED. Route every atlas
+# interaction through `ATLAS` instead.
+#
+# We keep our own gRPC server (handles the lifecycle Driver(CMD_INIT)
+# servicer) — that's NOT the part that talks to atlas.
+from robonix_api import ATLAS  # noqa: E402
+from robonix_api.atlas_types import Ros2Params, GrpcParams, Transport  # noqa: E402
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -100,7 +143,6 @@ CMD_DEACTIVATE = 2
 CMD_SHUTDOWN = 3
 
 _state_lock = threading.Lock()
-_atlas_stub: pb_grpc.AtlasStub | None = None
 _grpc_server: grpc.Server | None = None
 _initialized = False
 
@@ -241,48 +283,29 @@ def _enabled_sensors(cfg: dict[str, Any]) -> dict[str, bool]:
     return out
 
 
-# ── Atlas helpers (direct AtlasStub, no robonix_api wrapper) ──────────────────
+# ── Atlas helpers (via robonix_api ATLAS — current wire protocol) ────────────
 def _resolve_sensor_endpoint(contract_id: str) -> Optional[str]:
-    """Query atlas + connect one ROS2 contract; return the resolved topic."""
-    if _atlas_stub is None:
-        log.warning("atlas stub not ready; cannot resolve %s", contract_id)
-        return None
-    try:
-        resp = _atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
-            contract_id=contract_id,
-            transport=pb.TRANSPORT_ROS2,
-        ))
-    except grpc.RpcError as e:
-        log.warning("query %s failed: %s", contract_id, e)
-        return None
+    """Find one ROS2 capability for `contract_id` on atlas; return its topic.
 
-    for rec in resp.records:
-        has_iface = any(
-            iface.contract_id == contract_id and iface.transport == pb.TRANSPORT_ROS2
-            for iface in rec.interfaces
+    Uses `ATLAS.find_capability(...)` (which goes through the
+    Query{Primitive,Service,Skill}s + flat-flatten path on current atlas)
+    instead of the removed legacy `QueryCapabilities` + `ConnectCapability`
+    pair. We do NOT open a Channel here — the launch file actually
+    subscribes to the topic; we only need the endpoint string for
+    resolved.yaml. Skipping connect_capability avoids leaking a consumer
+    edge on atlas every time `_retry_resolve` polls."""
+    try:
+        caps = ATLAS.find_capability(
+            contract_id=contract_id,
+            transport=Transport.ROS2,
         )
-        if not has_iface:
-            continue
-        try:
-            conn = _atlas_stub.ConnectCapability(pb.ConnectCapabilityRequest(
-                consumer_id=CAP_ID,
-                capability_id=rec.capability_id,
-                contract_id=contract_id,
-                transport=pb.TRANSPORT_ROS2,
-            ))
-        except grpc.RpcError as e:
-            log.warning("connect %s/%s failed: %s", rec.capability_id, contract_id, e)
-            continue
-        endpoint = (conn.endpoint or "").strip()
-        if conn.channel_id:
-            try:
-                _atlas_stub.DisconnectCapability(pb.DisconnectCapabilityRequest(
-                    channel_id=conn.channel_id,
-                ))
-            except grpc.RpcError as e:
-                log.debug("disconnect %s: %s", conn.channel_id, e)
-        if endpoint:
-            return endpoint
+    except Exception as e:  # noqa: BLE001
+        log.warning("find_capability(%s) failed: %s", contract_id, e)
+        return None
+    for cap in caps:
+        ep = (cap.endpoint or "").strip()
+        if ep:
+            return ep
     return None
 
 
@@ -329,20 +352,25 @@ def _retry_resolve(cfg: dict[str, Any], deadline_s: float = 30.0,
 
 
 def _declare_ros2(contract_id: str, topic: str, qos: str = "reliable") -> str:
-    if _atlas_stub is None:
-        raise RuntimeError("atlas stub not ready")
+    """Atlas-declare `contract_id` as a ROS 2 topic_out at `topic`.
+
+    Replaces the old `_atlas_stub.DeclareInterface(...)` direct call with
+    the robonix_api wrapper, which routes to atlas's current
+    `DeclareCapability` RPC (the legacy `DeclareInterface` returns
+    UNIMPLEMENTED on the v0.1+ atlas).
+
+    ALREADY_EXISTS is fine — we may re-declare on Driver re-entry."""
     try:
-        resp = _atlas_stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            capability_id=CAP_ID,
+        return ATLAS.declare_capability(
+            provider_id=CAP_ID,
             contract_id=contract_id,
-            transport=pb.TRANSPORT_ROS2,
+            transport=Transport.ROS2,
             endpoint=topic,
-            params=pb.TransportParams(ros2=pb.Ros2Params(qos_profile=qos)),
-        ))
-        return resp.endpoint or topic
+            params=Ros2Params(qos_profile=qos),
+        ) or topic
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.ALREADY_EXISTS:
-            log.info("interface already declared: %s → %s", contract_id, topic)
+            log.info("capability already declared: %s → %s", contract_id, topic)
             return topic
         raise
 
@@ -538,28 +566,40 @@ def _start_grpc(requested_port: int) -> int:
 
 
 def _declare_grpc(contract_id: str, port: int, service_name: str, method: str) -> None:
-    if _atlas_stub is None:
-        raise RuntimeError("atlas stub not ready")
-    _atlas_stub.DeclareInterface(pb.DeclareInterfaceRequest(
-        capability_id=CAP_ID,
-        contract_id=contract_id,
-        transport=pb.TRANSPORT_GRPC,
-        endpoint=f"127.0.0.1:{port}",
-        params=pb.TransportParams(grpc=pb.GrpcParams(
-            proto_file="robonix_contracts.proto",
-            service_name=service_name,
-            method=method,
-        )),
-    ))
+    """Atlas-declare `contract_id` as a gRPC RPC at 127.0.0.1:port.
+
+    Same migration as _declare_ros2: legacy direct DeclareInterface →
+    robonix_api ATLAS.declare_capability under Transport.GRPC. We only
+    use this for the lifecycle `service/map/driver` interface; algo
+    output topics go through _declare_ros2."""
+    try:
+        ATLAS.declare_capability(
+            provider_id=CAP_ID,
+            contract_id=contract_id,
+            transport=Transport.GRPC,
+            endpoint=f"127.0.0.1:{port}",
+            params=GrpcParams(
+                proto_file="robonix_contracts.proto",
+                service_name=service_name,
+                method=method,
+            ),
+        )
+    except grpc.RpcError as e:
+        if e.code() == grpc.StatusCode.ALREADY_EXISTS:
+            log.info("capability already declared: %s → 127.0.0.1:%d",
+                     contract_id, port)
+            return
+        raise
 
 
 def _heartbeat_loop() -> None:
+    """Background heartbeat — atlas marks providers TERMINATED after
+    ~90s of silence (see capability.py / lifecycle docs). robonix_api
+    `ATLAS.heartbeat(id)` swallows transient RPC errors internally."""
     while True:
         time.sleep(HEARTBEAT_PERIOD_S)
-        if _atlas_stub is None:
-            continue
         try:
-            _atlas_stub.Heartbeat(pb.HeartbeatRequest(capability_id=CAP_ID))
+            ATLAS.heartbeat(CAP_ID)
         except Exception as e:  # noqa: BLE001
             log.debug("heartbeat: %s", e)
 
@@ -570,8 +610,6 @@ def _on_signal(signum, _frame):
 
 
 def main() -> int:
-    global _atlas_stub
-
     print(f"[atlas_bridge] main() entered; atlas={ATLAS_ENDPOINT} cap={CAP_ID} "
           f"pkg_host_dir={PKG_HOST_DIR} resolved_dir={RESOLVED_DIR}", flush=True)
 
@@ -584,34 +622,48 @@ def main() -> int:
     os.environ["MAPPING_GRPC_PORT"] = str(driver_port)
     print(f"[atlas_bridge] driver gRPC bound on :{driver_port}", flush=True)
 
-    print(f"[atlas_bridge] connecting to atlas at {ATLAS_ENDPOINT}", flush=True)
-    channel = grpc.insecure_channel(ATLAS_ENDPOINT)
-    stub = pb_grpc.AtlasStub(channel)
-    _atlas_stub = stub
+    # `ATLAS` is a robonix_api module-level singleton — first attribute
+    # access connects to ROBONIX_ATLAS (defaults to 127.0.0.1:50051) and
+    # caches the channel. We don't keep our own AtlasStub anymore;
+    # everything goes through ATLAS now (see header).
+    print(f"[atlas_bridge] registering with atlas at {ATLAS_ENDPOINT} via robonix_api",
+          flush=True)
     md_path = f"{PKG_HOST_DIR}/CAPABILITY.md" if PKG_HOST_DIR else ""
 
     try:
-        stub.RegisterCapability(pb.RegisterCapabilityRequest(
-            capability_id=CAP_ID,
-            namespace=NAMESPACE,
-            capability_md_path=md_path,
-        ))
-        log.info("registered cap %s namespace=%s", CAP_ID, NAMESPACE)
+        # mapping is a Service — register under that kind. The legacy
+        # generic RegisterCapability was removed; calling it now returns
+        # StatusCode.UNIMPLEMENTED, which is exactly the failure we used
+        # to ship from this file.
+        ATLAS.register_service(CAP_ID, NAMESPACE, md_path)
+        log.info("registered service %s namespace=%s", CAP_ID, NAMESPACE)
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.ALREADY_EXISTS:
-            log.info("cap %s already registered; continuing", CAP_ID)
+            log.info("service %s already registered; continuing", CAP_ID)
         else:
-            log.warning("atlas RegisterCapability failed: %s", e)
+            log.warning("atlas RegisterService failed: %s", e)
 
     try:
+        # service_name MUST be the FULL codegen-generated class name
+        # including the "Robonix" prefix — codegen uses
+        # `contract_id_to_pascal` (see robonix_api/lifecycle.py:35) which
+        # does uniform PascalCase, no prefix stripping. Earlier we passed
+        # "ServiceMapDriver" (stripped) which still works for old atlas
+        # back-ends that compared loosely, but the current atlas/cli
+        # treats `params.grpc.service_name` as an opaque string and
+        # forwards it verbatim to whoever is consuming the cap (rbnx
+        # boot uses it to build the gRPC method path). A mismatched
+        # name surfaces as `Driver(CMD_INIT)` → UNIMPLEMENTED on the
+        # consumer side. Use the codegen-canonical
+        # `RobonixServiceMapDriver`.
         _declare_grpc("robonix/service/map/driver", driver_port,
-                      "ServiceMapDriver", "Driver")
+                      "RobonixServiceMapDriver", "Driver")
         log.info("declared map driver iface on :%d (awaiting INIT)", driver_port)
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.ALREADY_EXISTS:
             log.info("map driver iface already declared; continuing")
         else:
-            log.warning("atlas DeclareInterface(driver) failed: %s", e)
+            log.warning("atlas DeclareCapability(driver) failed: %s", e)
 
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
     print(f"[atlas_bridge] ready — awaiting Driver(CMD_INIT) on :{driver_port}",
