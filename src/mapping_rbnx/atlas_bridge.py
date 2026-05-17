@@ -285,15 +285,17 @@ def _enabled_sensors(cfg: dict[str, Any]) -> dict[str, bool]:
 
 # ── Atlas helpers (via robonix_api ATLAS — current wire protocol) ────────────
 def _resolve_sensor_endpoint(contract_id: str) -> Optional[str]:
-    """Find one ROS2 capability for `contract_id` on atlas; return its topic.
+    """Find one ROS2 capability for `contract_id` on atlas, then connect
+    to obtain its endpoint.
 
-    Uses `ATLAS.find_capability(...)` (which goes through the
-    Query{Primitive,Service,Skill}s + flat-flatten path on current atlas)
-    instead of the removed legacy `QueryCapabilities` + `ConnectCapability`
-    pair. We do NOT open a Channel here — the launch file actually
-    subscribes to the topic; we only need the endpoint string for
-    resolved.yaml. Skipping connect_capability avoids leaking a consumer
-    edge on atlas every time `_retry_resolve` polls."""
+    `ATLAS.find_capability(...)` returns `Capability` records that
+    intentionally OMIT the endpoint string (see atlas_types.py:71 —
+    the comment is explicit). The endpoint only materializes through
+    `connect_capability(...) -> Channel`, whose `endpoint` attribute
+    is the actual ROS topic name we want for resolved.yaml. We close
+    the channel right after reading endpoint so atlas doesn't
+    accumulate a long-lived consumer edge for every sensor resolve
+    poll — the launch file is what actually subscribes."""
     try:
         caps = ATLAS.find_capability(
             contract_id=contract_id,
@@ -302,8 +304,24 @@ def _resolve_sensor_endpoint(contract_id: str) -> Optional[str]:
     except Exception as e:  # noqa: BLE001
         log.warning("find_capability(%s) failed: %s", contract_id, e)
         return None
+
     for cap in caps:
-        ep = (cap.endpoint or "").strip()
+        try:
+            ch = ATLAS.connect_capability(
+                consumer_id=CAP_ID,
+                provider_id=cap.provider_id,
+                contract_id=contract_id,
+                transport=Transport.ROS2,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("connect %s/%s failed: %s",
+                        cap.provider_id, contract_id, e)
+            continue
+        ep = (ch.endpoint or "").strip()
+        try:
+            ch.close()
+        except Exception:  # noqa: BLE001
+            pass
         if ep:
             return ep
     return None
